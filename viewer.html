@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>勤怠クラウドビューア</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: "Hiragino Sans", "Yu Gothic", sans-serif; margin: 0; background: #f4f4f5; color: #27272a; }
+  .wrap { max-width: 860px; margin: 0 auto; padding: 16px; }
+  header { background: #0f766e; color: #fff; padding: 14px 16px; }
+  header h1 { margin: 0; font-size: 18px; }
+  .card { background: #fff; border-radius: 12px; padding: 16px; margin-top: 14px; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+  label { display: block; font-size: 13px; font-weight: bold; margin: 10px 0 4px; }
+  input, select { width: 100%; padding: 10px; font-size: 15px; border: 1px solid #d4d4d8; border-radius: 8px; }
+  button { padding: 10px 18px; font-size: 14px; border: none; border-radius: 999px; cursor: pointer; }
+  .primary { background: #0f766e; color: #fff; font-weight: bold; }
+  .ghost { background: #e4e4e7; color: #3f3f46; }
+  .error { background: #fee2e2; color: #b91c1c; padding: 10px; border-radius: 8px; font-size: 13px; margin-top: 10px; }
+  .meta { font-size: 13px; color: #71717a; }
+  table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 14px; }
+  th, td { border: 1px solid #e4e4e7; padding: 6px 8px; text-align: left; }
+  th { background: #f4f4f5; }
+  tr.detail td { background: #fafafa; font-size: 13px; color: #52525b; }
+  .name-row { cursor: pointer; }
+  .name-row:hover { background: #f0fdfa; }
+  .controls { display: flex; gap: 10px; flex-wrap: wrap; align-items: flex-end; }
+  .controls > div { flex: 1; min-width: 160px; }
+  .right { margin-left: auto; }
+  .warn { color: #b45309; }
+</style>
+</head>
+<body>
+<header><h1>勤怠クラウドビューア</h1></header>
+<div class="wrap">
+
+  <!-- ログイン -->
+  <div id="loginView" class="card">
+    <p class="meta">iPadから自動送信された勤怠データを閲覧します。Supabaseの管理者アカウントでログインしてください。</p>
+    <label>メールアドレス</label>
+    <input id="email" type="email" autocomplete="email">
+    <label>パスワード</label>
+    <input id="password" type="password" autocomplete="current-password">
+    <div id="loginError"></div>
+    <p><button class="primary" onclick="login()">ログイン</button></p>
+  </div>
+
+  <!-- メイン -->
+  <div id="mainView" class="card" hidden>
+    <div class="controls">
+      <div>
+        <label>端末（用途）</label>
+        <select id="deviceSel" onchange="fillSnapshots()"></select>
+      </div>
+      <div>
+        <label>バックアップ（日ごとの保存ポイント）</label>
+        <select id="snapshotSel" onchange="loadSnapshot(this.value)"></select>
+      </div>
+      <div>
+        <label>表示する期間（10日締め）</label>
+        <select id="monthSel" onchange="render()"></select>
+      </div>
+      <div class="right" style="flex:0">
+        <button class="ghost" onclick="download()">JSONダウンロード</button>
+        <button class="ghost" onclick="logout()">ログアウト</button>
+      </div>
+    </div>
+    <p class="meta" id="snapMeta"></p>
+    <div id="summary"></div>
+  </div>
+
+</div>
+<script>
+const CLOUD_URL = 'https://fdvibgxcuviftanwrjnn.supabase.co';
+const CLOUD_KEY = 'sb_publishable_DA0blazZouSWkNMIylFKHg_aRPE6Cab';
+
+let token = sessionStorage.getItem('tce_token') || '';
+let snapshots = [];
+let current = null; // {day, updated_at, record_count, data}
+
+function headers() {
+  return { 'apikey': CLOUD_KEY, 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' };
+}
+
+async function login() {
+  const email = document.getElementById('email').value.trim();
+  const password = document.getElementById('password').value;
+  document.getElementById('loginError').innerHTML = '';
+  const res = await fetch(CLOUD_URL + '/auth/v1/token?grant_type=password', {
+    method: 'POST',
+    headers: { 'apikey': CLOUD_KEY, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, password })
+  });
+  if (!res.ok) {
+    let detail = '';
+    try {
+      const err = await res.json();
+      const code = err.error_code || err.error || '';
+      if (code === 'email_not_confirmed') {
+        detail = 'メールアドレスが未確認です。Supabaseでユーザー作成時に「Auto Confirm User」をONにしてください。';
+      } else if (code === 'invalid_credentials' || code === 'invalid_grant') {
+        detail = 'メールアドレスまたはパスワードが違います。timecardプロジェクトの Authentication → Users にユーザーがあるか確認してください。';
+      } else {
+        detail = 'エラー: ' + (err.msg || err.error_description || code || ('HTTP ' + res.status));
+      }
+    } catch {
+      detail = 'ログインに失敗しました (HTTP ' + res.status + ')';
+    }
+    document.getElementById('loginError').innerHTML = '<div class="error">' + detail + '</div>';
+    return;
+  }
+  const json = await res.json();
+  token = json.access_token;
+  sessionStorage.setItem('tce_token', token);
+  init();
+}
+
+function logout() {
+  token = '';
+  sessionStorage.removeItem('tce_token');
+  document.getElementById('mainView').hidden = true;
+  document.getElementById('loginView').hidden = false;
+}
+
+// 端末IDの表示名（index.html側のモード設定と対応）
+function deviceLabel(d) {
+  return { 'ipad-1': '通常勤務', 'ipad-swim': 'スイミング' }[d] || d;
+}
+
+async function init() {
+  const res = await fetch(CLOUD_URL + '/rest/v1/tce_backups?select=id,device,day,record_count,updated_at&order=day.desc&limit=180', { headers: headers() });
+  if (res.status === 401) { logout(); return; }
+  if (!res.ok) { alert('読み込みに失敗しました (HTTP ' + res.status + ')'); return; }
+  snapshots = await res.json();
+  if (snapshots.length === 0) {
+    alert('まだバックアップが届いていません。iPad側で一度打刻すると届きます。');
+  }
+  document.getElementById('loginView').hidden = true;
+  document.getElementById('mainView').hidden = false;
+
+  // 端末（用途）の選択肢を作る
+  const devices = [...new Set(snapshots.map(s => s.device))];
+  const dsel = document.getElementById('deviceSel');
+  dsel.innerHTML = devices.map(d => `<option value="${d}">${deviceLabel(d)}</option>`).join('');
+  fillSnapshots();
+}
+
+function fillSnapshots() {
+  const device = document.getElementById('deviceSel').value;
+  const list = snapshots.filter(s => s.device === device);
+  const sel = document.getElementById('snapshotSel');
+  sel.innerHTML = list.map(s =>
+    `<option value="${s.id}">${s.day}（${s.record_count}件）</option>`).join('');
+  if (list.length > 0) {
+    loadSnapshot(list[0].id);
+  } else {
+    current = null;
+    document.getElementById('snapMeta').textContent = 'この端末のバックアップはまだありません。';
+    document.getElementById('summary').innerHTML = '';
+  }
+}
+
+async function loadSnapshot(id) {
+  const res = await fetch(CLOUD_URL + '/rest/v1/tce_backups?id=eq.' + id + '&select=device,day,updated_at,record_count,data', { headers: headers() });
+  if (res.status === 401) { logout(); return; }
+  const rows = await res.json();
+  current = rows[0];
+  if (!current) return;
+  const t = new Date(current.updated_at);
+  document.getElementById('snapMeta').textContent =
+    `${deviceLabel(current.device)} / 最終送信: ${t.toLocaleString('ja-JP')} / 総記録数: ${current.record_count}件`;
+
+  // 期間（11日〜翌月10日 = 10日締め）の一覧を作る
+  const periods = new Set();
+  for (const name in current.data) {
+    for (const d in current.data[name]) periods.add(periodOf(d));
+  }
+  const sorted = [...periods].sort().reverse();
+  const msel = document.getElementById('monthSel');
+  msel.innerHTML = sorted.map(p => `<option value="${p}">${periodLabel(p)}</option>`).join('');
+  render();
+}
+
+// 10日締め: その日付が属する期間の「開始月」を返す（11日以降=当月、10日以前=前月開始の期間）
+function periodOf(dateStr) {
+  const y = +dateStr.slice(0, 4), m = +dateStr.slice(5, 7), day = +dateStr.slice(8, 10);
+  if (day >= 11) return dateStr.slice(0, 7);
+  const py = m === 1 ? y - 1 : y;
+  const pm = m === 1 ? 12 : m - 1;
+  return py + '-' + String(pm).padStart(2, '0');
+}
+
+function periodLabel(p) {
+  const y = +p.slice(0, 4), m = +p.slice(5, 7);
+  const nm = m === 12 ? 1 : m + 1;
+  return y + '年' + m + '月11日〜' + nm + '月10日';
+}
+
+function hoursBetween(a, b) {
+  const start = new Date('1970-01-01T' + a);
+  const end = new Date('1970-01-01T' + b);
+  return Math.max(0, (end - start) / 3600000);
+}
+
+function render() {
+  if (!current) return;
+  const month = document.getElementById('monthSel').value;
+  const data = current.data;
+  const names = Object.keys(data).sort((a, b) => a.localeCompare(b, 'ja'));
+  let html = '<table><tr><th>名前</th><th>出勤日数</th><th>合計時間</th></tr>';
+  for (const name of names) {
+    const dates = Object.keys(data[name]).filter(d => periodOf(d) === month).sort();
+    if (dates.length === 0) continue;
+    let total = 0;
+    let incomplete = 0;
+    let detail = '';
+    for (const d of dates) {
+      for (const rec of data[name][d]) {
+        if (rec.checkIn && rec.checkOut) {
+          const h = hoursBetween(rec.checkIn, rec.checkOut);
+          total += h;
+          detail += `<tr class="detail detail-${cssId(name)}" hidden><td>${d}</td><td colspan="2">${rec.checkIn} 〜 ${rec.checkOut}（${h.toFixed(1)}時間）</td></tr>`;
+        } else if (rec.checkIn) {
+          incomplete++;
+          detail += `<tr class="detail detail-${cssId(name)}" hidden><td>${d}</td><td colspan="2">${rec.checkIn} 〜 <span class="warn">退勤なし</span></td></tr>`;
+        }
+      }
+    }
+    html += `<tr class="name-row" onclick="toggleDetail('${cssId(name)}')"><td>▸ ${esc(name)}</td><td>${dates.length}日</td><td>${total.toFixed(1)}時間${incomplete ? `<span class="warn">（退勤なし${incomplete}件）</span>` : ''}</td></tr>`;
+    html += detail;
+  }
+  html += '</table><p class="meta">名前をクリックすると日ごとの明細が開きます。</p>';
+  document.getElementById('summary').innerHTML = html;
+}
+
+function toggleDetail(id) {
+  document.querySelectorAll('.detail-' + id).forEach(el => { el.hidden = !el.hidden; });
+}
+
+function cssId(name) {
+  return name.replace(/[^a-zA-Z0-9]/g, c => c.charCodeAt(0).toString(16));
+}
+
+function esc(s) {
+  return s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+// アプリの「復元」ボタンでそのまま読み込める形式でダウンロード
+function download() {
+  if (!current) return;
+  const blob = new Blob([JSON.stringify(current.data)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = '勤怠データ_' + deviceLabel(current.device) + '_' + current.day.replace(/-/g, '') + '.json';
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+if (token) init();
+</script>
+</body>
+</html>
