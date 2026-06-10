@@ -1,7 +1,8 @@
-const CACHE_NAME = 'timecard-v4';
+const CACHE_NAME = 'timecard-v7';
 const urlsToCache = [
   './',
   './index.html',
+  './swim.html',
   './manifest.json',
   './logo.png',
   './icon-192.png',
@@ -62,29 +63,31 @@ self.addEventListener('activate', event => {
 // ネットワークリクエストの処理
 self.addEventListener('fetch', event => {
   // HTMLファイルのリクエストを処理
+  // ネットワーク優先：オンラインなら常に最新版を取得し、オフライン時のみキャッシュを使う
+  // （更新が届かない問題と、viewer.htmlを開いてもindex.htmlが出る問題の対策）
   if (event.request.destination === 'document') {
     event.respondWith(
-      caches.match('./')
+      fetch(event.request)
         .then(response => {
-          if (response) {
-            return response;
+          // 取得できた最新版をキャッシュに保存しておく（オフライン用）
+          if (response.status === 200) {
+            const responseClone = response.clone();
+            caches.open(CACHE_NAME)
+              .then(cache => {
+                cache.put(event.request, responseClone);
+              });
           }
-          return fetch(event.request)
-            .then(response => {
-              // 成功したレスポンスをキャッシュに保存
-              if (response.status === 200) {
-                const responseClone = response.clone();
-                caches.open(CACHE_NAME)
-                  .then(cache => {
-                    cache.put(event.request, responseClone);
-                  });
-              }
-              return response;
-            })
-            .catch(() => {
-              // ネットワークが利用できない場合、キャッシュされたindex.htmlを返す
-              return caches.match('./');
-            });
+          return response;
+        })
+        .catch(() => {
+          // オフライン時：そのページのキャッシュを優先
+          // swim.htmlはswim.htmlへ、それ以外はindex.htmlへ（絶対に混ぜない）
+          return caches.match(event.request).then(cached => {
+            if (cached) return cached;
+            const path = new URL(event.request.url).pathname;
+            if (path.endsWith('swim.html')) return caches.match('./swim.html');
+            return caches.match('./');
+          });
         })
     );
     return;
