@@ -31,7 +31,13 @@
 </style>
 </head>
 <body>
-<header><h1>勤怠クラウドビューア</h1></header>
+<header style="display:flex;justify-content:space-between;align-items:center;">
+  <h1>勤怠クラウドビューア</h1>
+  <a href="https://supabase.com/dashboard/project/fdvibgxcuviftanwrjnn/editor/17515" target="_blank"
+     style="color:#fff;font-size:13px;background:rgba(255,255,255,.18);padding:6px 14px;border-radius:999px;text-decoration:none;">
+    🛠 Supabase管理画面
+  </a>
+</header>
 <div class="wrap">
 
   <!-- ログイン -->
@@ -50,9 +56,9 @@
     <div class="controls">
       <div>
         <label>用途</label>
-        <select id="modeSel" onchange="render()">
-          <option value="normal">通常勤務</option>
-          <option value="swim">スイミング</option>
+        <select id="modeSel" onchange="onModeChange()">
+          <option value="ipad-1">通常勤務</option>
+          <option value="ipad-swim">スイミング</option>
         </select>
       </div>
       <div>
@@ -79,14 +85,22 @@ const CLOUD_KEY = 'sb_publishable_DA0blazZouSWkNMIylFKHg_aRPE6Cab';
 
 let token = sessionStorage.getItem('tce_token') || '';
 let snapshots = [];
-let current = null; // {day, updated_at, record_count, data}
+let current = null;
+
+function getDevice() {
+  return document.getElementById('modeSel').value; // 'ipad-1' or 'ipad-swim'
+}
+
+function getModeLabel() {
+  return getDevice() === 'ipad-swim' ? 'スイミング' : '通常勤務';
+}
 
 function headers() {
   return { 'apikey': CLOUD_KEY, 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' };
 }
 
 async function login() {
-  const email = document.getElementById('email').value.trim();
+  const email    = document.getElementById('email').value.trim();
   const password = document.getElementById('password').value;
   document.getElementById('loginError').innerHTML = '';
   const res = await fetch(CLOUD_URL + '/auth/v1/token?grant_type=password', {
@@ -102,7 +116,7 @@ async function login() {
       if (code === 'email_not_confirmed') {
         detail = 'メールアドレスが未確認です。Supabaseでユーザー作成時に「Auto Confirm User」をONにしてください。';
       } else if (code === 'invalid_credentials' || code === 'invalid_grant') {
-        detail = 'メールアドレスまたはパスワードが違います。timecardプロジェクトの Authentication → Users にユーザーがあるか確認してください。';
+        detail = 'メールアドレスまたはパスワードが違います。';
       } else {
         detail = 'エラー: ' + (err.msg || err.error_description || code || ('HTTP ' + res.status));
       }
@@ -125,13 +139,30 @@ function logout() {
   document.getElementById('loginView').hidden = false;
 }
 
+// 用途切替 → 同じ認証のまま別deviceのデータを取得
+function onModeChange() {
+  current = null;
+  document.getElementById('snapshotSel').innerHTML = '';
+  document.getElementById('monthSel').innerHTML = '';
+  document.getElementById('summary').innerHTML = '';
+  document.getElementById('snapMeta').textContent = '';
+  init();
+}
+
 async function init() {
-  const res = await fetch(CLOUD_URL + '/rest/v1/tce_backups?select=id,device,day,record_count,updated_at&order=day.desc&limit=90', { headers: headers() });
+  const device = getDevice();
+  const res = await fetch(
+    CLOUD_URL + '/rest/v1/tce_backups?select=id,device,day,record_count,updated_at' +
+    '&device=eq.' + encodeURIComponent(device) +
+    '&order=day.desc&limit=90',
+    { headers: headers() }
+  );
   if (res.status === 401) { logout(); return; }
   if (!res.ok) { alert('読み込みに失敗しました (HTTP ' + res.status + ')'); return; }
   snapshots = await res.json();
   if (snapshots.length === 0) {
-    alert('まだバックアップが届いていません。iPad側で一度打刻すると届きます。');
+    document.getElementById('summary').innerHTML =
+      '<p class="meta" style="padding:20px 0;">まだバックアップが届いていません。iPad側で一度打刻すると届きます。</p>';
   }
   document.getElementById('loginView').hidden = true;
   document.getElementById('mainView').hidden = false;
@@ -142,19 +173,23 @@ async function init() {
 }
 
 async function loadSnapshot(id) {
-  const res = await fetch(CLOUD_URL + '/rest/v1/tce_backups?id=eq.' + id + '&select=day,updated_at,record_count,data', { headers: headers() });
+  const res = await fetch(
+    CLOUD_URL + '/rest/v1/tce_backups?id=eq.' + id + '&select=day,updated_at,record_count,data',
+    { headers: headers() }
+  );
   if (res.status === 401) { logout(); return; }
   const rows = await res.json();
   current = rows[0];
   if (!current) return;
   const t = new Date(current.updated_at);
   document.getElementById('snapMeta').textContent =
-    `最終送信: ${t.toLocaleString('ja-JP')} / 総記録数: ${current.record_count}件`;
+    `【${getModeLabel()}】最終送信: ${t.toLocaleString('ja-JP')} / 総記録数: ${current.record_count}件`;
 
-  // 期間（11日〜翌月10日 = 10日締め）の一覧を作る
+  // データを取得（旧combined形式にも対応）
+  const data = getDataForMode();
   const periods = new Set();
-  for (const name in current.data) {
-    for (const d in current.data[name]) periods.add(periodOf(d));
+  for (const name in data) {
+    for (const d in data[name]) periods.add(periodOf(d));
   }
   const sorted = [...periods].sort().reverse();
   const msel = document.getElementById('monthSel');
@@ -162,7 +197,19 @@ async function loadSnapshot(id) {
   render();
 }
 
-// 10日締め: その日付が属する期間の「開始月」を返す（11日以降=当月、10日以前=前月開始の期間）
+// current.dataからこのdeviceに対応するデータを取り出す
+// 旧combined形式 {normal:{}, swim:{}} にも対応
+function getDataForMode() {
+  if (!current || !current.data) return {};
+  const d = current.data;
+  if (d.normal !== undefined || d.swim !== undefined) {
+    // 旧combined形式
+    const key = getDevice() === 'ipad-swim' ? 'swim' : 'normal';
+    return d[key] || {};
+  }
+  return d;
+}
+
 function periodOf(dateStr) {
   const y = +dateStr.slice(0, 4), m = +dateStr.slice(5, 7), day = +dateStr.slice(8, 10);
   if (day >= 11) return dateStr.slice(0, 7);
@@ -179,24 +226,25 @@ function periodLabel(p) {
 
 function hoursBetween(a, b) {
   const start = new Date('1970-01-01T' + a);
-  const end = new Date('1970-01-01T' + b);
+  const end   = new Date('1970-01-01T' + b);
   return Math.max(0, (end - start) / 3600000);
 }
 
 function render() {
   if (!current) return;
   const month = document.getElementById('monthSel').value;
-  const mode = document.getElementById('modeSel').value;
-  // { normal:{...}, swim:{...} } 形式と旧形式（フラット）の両対応
-  const data = (current.data && current.data[mode]) ? current.data[mode] : current.data;
+  const data  = getDataForMode();
   const names = Object.keys(data).sort((a, b) => a.localeCompare(b, 'ja'));
+  if (names.length === 0) {
+    document.getElementById('summary').innerHTML =
+      '<p class="meta" style="padding:20px 0;">このモードのデータはありません。</p>';
+    return;
+  }
   let html = '<table><tr><th>名前</th><th>出勤日数</th><th>合計時間</th></tr>';
   for (const name of names) {
     const dates = Object.keys(data[name]).filter(d => periodOf(d) === month).sort();
     if (dates.length === 0) continue;
-    let total = 0;
-    let incomplete = 0;
-    let detail = '';
+    let total = 0, incomplete = 0, detail = '';
     for (const d of dates) {
       for (const rec of data[name][d]) {
         if (rec.checkIn && rec.checkOut) {
@@ -228,18 +276,29 @@ function esc(s) {
   return s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
-// アプリの「復元」ボタンでそのまま読み込める形式でダウンロード
+// 表示中の期間（10日締め）のデータだけをダウンロード
 function download() {
   if (!current) return;
-  const mode = document.getElementById('modeSel').value;
-  const exportData = (current.data && current.data[mode]) ? current.data[mode] : current.data;
-  const blob = new Blob([JSON.stringify(exportData)], { type: 'application/json' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  const mode = document.getElementById('modeSel').value;
-  const modeLabel = mode === 'swim' ? 'スイミング' : '通常勤務';
-  a.download = '勤怠データ_' + modeLabel + '_' + current.day.replace(/-/g, '') + '.json';
+  const month = document.getElementById('monthSel').value;
+  const data  = getDataForMode();
+  const filtered = {};
+  for (const name in data) {
+    for (const d in data[name]) {
+      if (periodOf(d) !== month) continue;
+      if (!filtered[name]) filtered[name] = {};
+      filtered[name][d] = data[name][d];
+    }
+  }
+  // ファイル名例: 勤怠元データ_通常_2026_4-5.json（4月11日〜5月10日分）
+  const py = +month.slice(0, 4);
+  const pm = +month.slice(5, 7);
+  const nm = pm === 12 ? 1 : pm + 1;
+  const modeName = getDevice() === 'ipad-swim' ? 'スイミング' : '通常';
+  const blob = new Blob([JSON.stringify(filtered)], { type: 'application/json' });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href     = url;
+  a.download = `勤怠元データ_${modeName}_${py}_${pm}-${nm}.json`;
   a.click();
   URL.revokeObjectURL(url);
 }
