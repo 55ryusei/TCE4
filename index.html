@@ -1690,8 +1690,7 @@
       <button id="backupBtn" class="admin-btn success">バックアップ</button>
       <button id="restoreBtn" class="admin-btn warning">リストア</button>
       <input type="file" id="restoreFile" style="display:none;">
-      <button id="modeBtn" class="admin-btn">モード切替（通常/スイミング）</button>
-      <button id="clearAllBtn" class="admin-btn danger">全データ削除</button>
+<button id="clearAllBtn" class="admin-btn danger">全データ削除</button>
     </div>
     <div class="form-group">
       <label for="searchEmpName">検索</label>
@@ -1713,165 +1712,30 @@
     let deferredPrompt; // PWAインストールプロンプト用
 
     // ====== クラウドバックアップ (v4.0.0 / Supabase) ======
-    // 設定が空のときはクラウド機能オフ（3.1.0と同じ動作）になる
     const CLOUD_URL = 'https://fdvibgxcuviftanwrjnn.supabase.co';
     const CLOUD_KEY = 'sb_publishable_DA0blazZouSWkNMIylFKHg_aRPE6Cab';
+
+    // ====== このファイルの用途設定（swim.html とはここだけ違う）======
+    const DEVICE_ID  = 'ipad-1';
+    const APP_LABEL  = '通常勤務';
+    const APP_COLOR  = 'mode-normal';
+    const KEY_SUFFIX = '';
+    const FORM_URL   = 'https://docs.google.com/forms/d/e/1FAIpQLSd1-b9gzQ4XT5hbfkNkBJyRMYceK7R5Z-gf2-NzBywQUNPi2g/viewform';
+    // ====== 用途設定ここまで ======
+
     let cloudRetryTimer = null;
 
-    // ====== 端末モード（通常勤務 / スイミング） ======
-    // 2台のiPadが同じSupabaseを使っても、このIDで別々の行に保存される
-    const DEVICE_MODES = {
-      normal: {
-        id: 'ipad-1',   // クラウドは常にipad-1に統合
-        label: '通常勤務',
-        form: 'https://docs.google.com/forms/d/e/1FAIpQLSd1-b9gzQ4XT5hbfkNkBJyRMYceK7R5Z-gf2-NzBywQUNPi2g/viewform'
-      },
-      swim: {
-        id: 'ipad-1',   // クラウドは常にipad-1に統合
-        label: 'スイミング',
-        form: 'https://docs.google.com/forms/d/e/1FAIpQLSdFQLieY7235N6kb3aUu6kihKH2ZiiayIZDMUjl3h65RqlAHQ/viewform'
-      }
-    };
-
-    function getDeviceMode() {
-      const m = localStorage.getItem('deviceMode');
-      return DEVICE_MODES[m] ? m : null;
-    }
-
-    function getDeviceId() {
-      const m = getDeviceMode();
-      return m ? DEVICE_MODES[m].id : 'ipad-1';
-    }
-
-    // 打刻データもモードごとに完全に分ける
-    // （通常=従来のキーをそのまま使う、スイミング=_swim付きの別キー）
-    function modeSuffix() {
-      return getDeviceMode() === 'swim' ? '_swim' : '';
-    }
-
-    function storageKey() {
-      return STORAGE_KEY + modeSuffix();
-    }
-
-    function nameUsageKey() {
-      return 'nameUsageOrder' + modeSuffix();
-    }
+    function storageKey()   { return STORAGE_KEY + KEY_SUFFIX; }
+    function nameUsageKey() { return 'nameUsageOrder' + KEY_SUFFIX; }
+    function cloudConfigured() { return CLOUD_URL !== '' && CLOUD_KEY !== ''; }
 
     function updateModeLabel() {
       const el = document.getElementById('modeLabel');
-      if (el) {
-        const m = getDeviceMode();
-        if (m) {
-          el.innerHTML = '<span class="' + (m === 'swim' ? 'mode-swim' : 'mode-normal') + '">' + DEVICE_MODES[m].label + '</span>';
-        } else {
-          el.innerHTML = '';
-        }
-      }
-      updateFormLinks();
-    }
-
-    // モードに応じてGoogleフォームのリンク先を切り替える
-    function updateFormLinks() {
-      const m = getDeviceMode();
-      const url = (m ? DEVICE_MODES[m] : DEVICE_MODES.normal).form;
+      if (el) el.innerHTML = '<span class="' + APP_COLOR + '">' + APP_LABEL + '</span>';
       ['contactLink', 'formOpenLink'].forEach(id => {
         const a = document.getElementById(id);
-        if (a) a.href = url;
+        if (a) a.href = FORM_URL;
       });
-    }
-
-    // モード選択ダイアログ（firstTime=trueのときは選ぶまで閉じられない）
-    function showModeSelectModal(firstTime) {
-      const dialog = document.createElement('div');
-      dialog.className = 'confirm-dialog';
-      dialog.innerHTML =
-        '<div class="confirm-dialog-content">' +
-          '<h3>このiPadの用途を選択</h3>' +
-          '<p>クラウドバックアップを分けて保存するため、このiPadの用途を選んでください。</p>' +
-          '<div class="confirm-buttons" style="flex-direction: column;">' +
-            '<button class="confirm-btn mode-select-btn" data-mode="normal" style="background: #ec4899; color: #fff;">通常勤務</button>' +
-            '<button class="confirm-btn mode-select-btn" data-mode="swim" style="background: #3b82f6; color: #fff;">スイミング</button>' +
-            (firstTime ? '' : '<button class="confirm-btn cancel">キャンセル</button>') +
-          '</div>' +
-        '</div>';
-      document.body.appendChild(dialog);
-
-      const closeDialog = () => {
-        dialog.style.opacity = '0';
-        setTimeout(() => { if (document.body.contains(dialog)) document.body.removeChild(dialog); }, 300);
-      };
-
-      dialog.querySelectorAll('.mode-select-btn').forEach(btn => {
-        btn.addEventListener('click', () => {
-          const mode = btn.getAttribute('data-mode');
-          localStorage.setItem('deviceMode', mode);
-          updateModeLabel();
-          closeDialog();
-
-          const finish = () => {
-            // モードごとの別データに表示を切り替える
-            document.getElementById('empName').value = '';
-            updateClearButton('empName', 'clearEmpNameBtn');
-            updateButtons('');
-            displayEmpRecords();
-            showAlert('「' + DEVICE_MODES[mode].label + '」モードに設定しました', 'success');
-            syncToCloud();
-          };
-
-          // スイミングを初めて選んだ場合、このiPadの既存記録を引き継ぐか確認
-          if (mode === 'swim' &&
-              localStorage.getItem(STORAGE_KEY + '_swim') === null &&
-              localStorage.getItem(STORAGE_KEY)) {
-            askSwimMigration(finish);
-          } else {
-            finish();
-          }
-        });
-      });
-
-      const cancelBtn = dialog.querySelector('.cancel');
-      if (cancelBtn) cancelBtn.addEventListener('click', closeDialog);
-    }
-
-    // スイミングモード初回設定時：既存記録の引き継ぎ確認
-    function askSwimMigration(done) {
-      const dialog = document.createElement('div');
-      dialog.className = 'confirm-dialog';
-      dialog.innerHTML =
-        '<div class="confirm-dialog-content">' +
-          '<h3>既存の記録の引き継ぎ</h3>' +
-          '<p>このiPadに保存されている勤怠記録をスイミングモードに引き継ぎますか？<br><br>このiPadを今までスイミングの打刻に使っていた場合は「引き継ぐ」を選んでください。</p>' +
-          '<div class="confirm-buttons" style="flex-direction: column;">' +
-            '<button class="confirm-btn" id="migrateYes" style="background: #3b82f6; color: #fff;">引き継ぐ</button>' +
-            '<button class="confirm-btn cancel" id="migrateNo">引き継がない（空の状態で開始）</button>' +
-          '</div>' +
-        '</div>';
-      document.body.appendChild(dialog);
-
-      const close = () => {
-        dialog.style.opacity = '0';
-        setTimeout(() => { if (document.body.contains(dialog)) document.body.removeChild(dialog); }, 300);
-      };
-
-      dialog.querySelector('#migrateYes').addEventListener('click', () => {
-        localStorage.setItem(STORAGE_KEY + '_swim', localStorage.getItem(STORAGE_KEY) || '{}');
-        const usage = localStorage.getItem('nameUsageOrder');
-        if (usage) localStorage.setItem('nameUsageOrder_swim', usage);
-        close();
-        done();
-      });
-
-      dialog.querySelector('#migrateNo').addEventListener('click', () => {
-        // 空のデータを作っておく（次回から確認を出さないため）
-        localStorage.setItem(STORAGE_KEY + '_swim', '{}');
-        close();
-        done();
-      });
-    }
-    // ====== 端末モードここまで ======
-
-    function cloudConfigured() {
-      return CLOUD_URL !== '' && CLOUD_KEY !== '';
     }
 
     function countAllRecords(data) {
@@ -1903,55 +1767,28 @@
       }
     }
 
-    // モードを指定してデータを読む（クラウド送信用）
-    function loadDataForMode(mode) {
-      const key = mode === 'swim' ? STORAGE_KEY + '_swim' : STORAGE_KEY;
-      let obj = null;
-      try { obj = JSON.parse(localStorage.getItem(key) || '{}'); } catch {}
-      return isValidTimecardData(obj) ? obj : {};
-    }
-
-    // 全データのスナップショットをSupabaseへ送る（1日1行を上書き）
-    // 通常・スイミング両方を { normal:{...}, swim:{...} } にまとめてipad-1に送る
+    // 全データのスナップショットをSupabaseへ送る（upsert: 1リクエストで挿入or更新）
     async function syncToCloud() {
       if (!cloudConfigured()) return;
       clearTimeout(cloudRetryTimer);
-      const normalData = loadDataForMode('normal');
-      const swimData   = loadDataForMode('swim');
-      const combined   = { normal: normalData, swim: swimData };
-      const totalCount = countAllRecords(normalData) + countAllRecords(swimData);
+      const data = loadData();
       const now = getJstDate();
       const day = getLocalDateString(now);
       try {
-        const headers = {
-          'apikey': CLOUD_KEY,
-          'Content-Type': 'application/json',
-          'Prefer': 'return=minimal'
-        };
-        const payload = {
-          device: 'ipad-1',
-          day: day,
-          data: combined,
-          record_count: totalCount,
-          updated_at: new Date().toISOString()
-        };
-        // まず新規送信。今日の分が既にあれば(409)上書きに切り替える
-        let res = await fetch(CLOUD_URL + '/rest/v1/tce_backups', {
+        // サーバー側の専用関数で「なければ新規・あれば上書き」を1回で行う
+        const res = await fetch(CLOUD_URL + '/rest/v1/rpc/tce_upsert_backup', {
           method: 'POST',
-          headers: headers,
-          body: JSON.stringify(payload)
+          headers: {
+            'apikey': CLOUD_KEY,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            p_device: DEVICE_ID,
+            p_day: day,
+            p_data: data,
+            p_count: countAllRecords(data)
+          })
         });
-        if (res.status === 409) {
-          res = await fetch(CLOUD_URL + '/rest/v1/tce_backups?device=eq.ipad-1&day=eq.' + day, {
-            method: 'PATCH',
-            headers: headers,
-            body: JSON.stringify({
-              data: payload.data,
-              record_count: payload.record_count,
-              updated_at: payload.updated_at
-            })
-          });
-        }
         if (!res.ok) throw new Error('HTTP ' + res.status);
         localStorage.setItem('cloudSyncPending', '0');
         localStorage.setItem('lastCloudSync',
@@ -1961,7 +1798,7 @@
       } catch (e) {
         localStorage.setItem('cloudSyncPending', '1');
         updateSyncBadge(false);
-        cloudRetryTimer = setTimeout(syncToCloud, 60000); // 60秒後に自動再試行
+        cloudRetryTimer = setTimeout(syncToCloud, 60000);
       }
     }
 
@@ -3125,9 +2962,7 @@
         const now = new Date();
         const dateStr = now.toISOString().slice(0,10).replace(/-/g, '');
         const timeStr = now.toTimeString().slice(0,5).replace(/:/g, '');
-        const m = getDeviceMode();
-        const modeLabel = m ? DEVICE_MODES[m].label + '_' : '';
-        const filename = `勤怠データ_${modeLabel}${dateStr}_${timeStr}.json`;
+        const filename = `勤怠データ_${APP_LABEL}_${dateStr}_${timeStr}.json`;
         
         // JSONファイルを直接ダウンロード
         const blob = new Blob([data], { type: 'application/json' });
@@ -3166,17 +3001,7 @@
         reader.readAsText(e.target.files[0]);
       });
 
-      // モード切替（誤操作防止のためパスワード式）
-      document.getElementById('modeBtn').addEventListener('click', () => {
-        const pwd = prompt('パスワードを入力してください:');
-        if (pwd === '4564') {
-          showModeSelectModal(false);
-        } else if (pwd !== null) {
-          showAlert('パスワードが違います', 'error');
-        }
-      });
-
-      document.getElementById('clearAllBtn').addEventListener('click', () => {
+document.getElementById('clearAllBtn').addEventListener('click', () => {
         const pwd = prompt('パスワードを入力してください:');
         if (pwd === '4564') {
           localStorage.removeItem(storageKey());
@@ -3200,11 +3025,7 @@
       updateClearButton('empName', 'clearEmpNameBtn');
       updateClearButton('searchEmpName', 'clearSearchBtn');
 
-      // 端末モードの初期化（未設定なら選択ダイアログを表示）
       updateModeLabel();
-      if (!getDeviceMode()) {
-        showModeSelectModal(true);
-      }
     });
   </script>
 
