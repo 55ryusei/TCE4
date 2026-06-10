@@ -1743,6 +1743,20 @@
       return m ? DEVICE_MODES[m].id : 'ipad-1';
     }
 
+    // 打刻データもモードごとに完全に分ける
+    // （通常=従来のキーをそのまま使う、スイミング=_swim付きの別キー）
+    function modeSuffix() {
+      return getDeviceMode() === 'swim' ? '_swim' : '';
+    }
+
+    function storageKey() {
+      return STORAGE_KEY + modeSuffix();
+    }
+
+    function nameUsageKey() {
+      return 'nameUsageOrder' + modeSuffix();
+    }
+
     function updateModeLabel() {
       const el = document.getElementById('modeLabel');
       if (el) {
@@ -1793,13 +1807,66 @@
           localStorage.setItem('deviceMode', mode);
           updateModeLabel();
           closeDialog();
-          showAlert('「' + DEVICE_MODES[mode].label + '」モードに設定しました', 'success');
-          syncToCloud();
+
+          const finish = () => {
+            // モードごとの別データに表示を切り替える
+            document.getElementById('empName').value = '';
+            updateClearButton('empName', 'clearEmpNameBtn');
+            updateButtons('');
+            displayEmpRecords();
+            showAlert('「' + DEVICE_MODES[mode].label + '」モードに設定しました', 'success');
+            syncToCloud();
+          };
+
+          // スイミングを初めて選んだ場合、このiPadの既存記録を引き継ぐか確認
+          if (mode === 'swim' &&
+              localStorage.getItem(STORAGE_KEY + '_swim') === null &&
+              localStorage.getItem(STORAGE_KEY)) {
+            askSwimMigration(finish);
+          } else {
+            finish();
+          }
         });
       });
 
       const cancelBtn = dialog.querySelector('.cancel');
       if (cancelBtn) cancelBtn.addEventListener('click', closeDialog);
+    }
+
+    // スイミングモード初回設定時：既存記録の引き継ぎ確認
+    function askSwimMigration(done) {
+      const dialog = document.createElement('div');
+      dialog.className = 'confirm-dialog';
+      dialog.innerHTML =
+        '<div class="confirm-dialog-content">' +
+          '<h3>既存の記録の引き継ぎ</h3>' +
+          '<p>このiPadに保存されている勤怠記録をスイミングモードに引き継ぎますか？<br><br>このiPadを今までスイミングの打刻に使っていた場合は「引き継ぐ」を選んでください。</p>' +
+          '<div class="confirm-buttons" style="flex-direction: column;">' +
+            '<button class="confirm-btn" id="migrateYes" style="background: #3b82f6; color: #fff;">引き継ぐ</button>' +
+            '<button class="confirm-btn cancel" id="migrateNo">引き継がない（空の状態で開始）</button>' +
+          '</div>' +
+        '</div>';
+      document.body.appendChild(dialog);
+
+      const close = () => {
+        dialog.style.opacity = '0';
+        setTimeout(() => { if (document.body.contains(dialog)) document.body.removeChild(dialog); }, 300);
+      };
+
+      dialog.querySelector('#migrateYes').addEventListener('click', () => {
+        localStorage.setItem(STORAGE_KEY + '_swim', localStorage.getItem(STORAGE_KEY) || '{}');
+        const usage = localStorage.getItem('nameUsageOrder');
+        if (usage) localStorage.setItem('nameUsageOrder_swim', usage);
+        close();
+        done();
+      });
+
+      dialog.querySelector('#migrateNo').addEventListener('click', () => {
+        // 空のデータを作っておく（次回から確認を出さないため）
+        localStorage.setItem(STORAGE_KEY + '_swim', '{}');
+        close();
+        done();
+      });
     }
     // ====== 端末モードここまで ======
 
@@ -1829,7 +1896,7 @@
         el.style.color = '#b91c1c';
         el.textContent = '☁ 未送信あり（電波が戻れば自動送信）';
       } else {
-        const last = localStorage.getItem('lastCloudSync');
+        const last = localStorage.getItem('lastCloudSync' + modeSuffix());
         el.style.background = '#dcfce7';
         el.style.color = '#15803d';
         el.textContent = '☁ クラウド保存済み' + (last ? ' ' + last : '');
@@ -1874,13 +1941,13 @@
           });
         }
         if (!res.ok) throw new Error('HTTP ' + res.status);
-        localStorage.setItem('cloudSyncPending', '0');
-        localStorage.setItem('lastCloudSync',
+        localStorage.setItem('cloudSyncPending' + modeSuffix(), '0');
+        localStorage.setItem('lastCloudSync' + modeSuffix(),
           now.getHours().toString().padStart(2, '0') + ':' + now.getMinutes().toString().padStart(2, '0'));
-        localStorage.setItem('lastCloudSyncDay', day);
+        localStorage.setItem('lastCloudSyncDay' + modeSuffix(), day);
         updateSyncBadge(true);
       } catch (e) {
-        localStorage.setItem('cloudSyncPending', '1');
+        localStorage.setItem('cloudSyncPending' + modeSuffix(), '1');
         updateSyncBadge(false);
         cloudRetryTimer = setTimeout(syncToCloud, 60000); // 60秒後に自動再試行
       }
@@ -1888,15 +1955,15 @@
 
     // 電波が戻ったら未送信分を自動送信
     window.addEventListener('online', () => {
-      if (localStorage.getItem('cloudSyncPending') === '1') syncToCloud();
+      if (localStorage.getItem('cloudSyncPending' + modeSuffix()) === '1') syncToCloud();
     });
 
     // 起動時: 未送信があれば送る、なければ前回の状態をバッジ表示
     window.addEventListener('load', () => {
       setTimeout(() => {
-        if (localStorage.getItem('cloudSyncPending') === '1') {
+        if (localStorage.getItem('cloudSyncPending' + modeSuffix()) === '1') {
           syncToCloud();
-        } else if (localStorage.getItem('lastCloudSync')) {
+        } else if (localStorage.getItem('lastCloudSync' + modeSuffix())) {
           updateSyncBadge(true);
         }
       }, 2000);
@@ -1924,14 +1991,14 @@
     function loadData() {
       let obj = null;
       try {
-        obj = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
+        obj = JSON.parse(localStorage.getItem(storageKey()) || '{}');
       } catch {}
       if (isValidTimecardData(obj)) return obj;
       // 壊れたデータは消さずに退避してから初期化（後で取り出せる）
-      const bad = localStorage.getItem(STORAGE_KEY);
+      const bad = localStorage.getItem(storageKey());
       if (bad !== null) {
-        localStorage.setItem(STORAGE_KEY + '_broken_' + Date.now(), bad);
-        localStorage.removeItem(STORAGE_KEY);
+        localStorage.setItem(storageKey() + '_broken_' + Date.now(), bad);
+        localStorage.removeItem(storageKey());
         try {
           showAlert('保存データが壊れていたため初期化しました（壊れたデータは退避してあります）', 'error');
         } catch {}
@@ -2125,10 +2192,10 @@
 
     // 名前の使用順序を更新
     function updateNameUsageOrder(name) {
-      let nameUsage = JSON.parse(localStorage.getItem('nameUsageOrder') || '{}');
+      let nameUsage = JSON.parse(localStorage.getItem(nameUsageKey()) || '{}');
       // 現在のタイムスタンプを使用順序として記録
       nameUsage[name] = Date.now();
-      localStorage.setItem('nameUsageOrder', JSON.stringify(nameUsage));
+      localStorage.setItem(nameUsageKey(), JSON.stringify(nameUsage));
     }
 
     // 既存の名前リストを取得（使用順）
@@ -2136,7 +2203,7 @@
     // 休職などで消えた人も、同じ名前を手入力して打刻すれば翌回から復活する）
     function getExistingNames() {
       const data = loadData();
-      const nameUsage = JSON.parse(localStorage.getItem('nameUsageOrder') || '{}');
+      const nameUsage = JSON.parse(localStorage.getItem(nameUsageKey()) || '{}');
       const names = Object.keys(data);
       const cutoff = Date.now() - 60 * 24 * 60 * 60 * 1000;
 
@@ -2215,7 +2282,7 @@
           nameSpan.textContent = name;
           
           // 最後の使用日を取得
-          const nameUsage = JSON.parse(localStorage.getItem('nameUsageOrder') || '{}');
+          const nameUsage = JSON.parse(localStorage.getItem(nameUsageKey()) || '{}');
           const lastUsed = nameUsage[name];
           const infoSpan = document.createElement('span');
           infoSpan.className = 'dropdown-item-info';
@@ -2354,7 +2421,7 @@
           delete data[name];
         }
         
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+        localStorage.setItem(storageKey(), JSON.stringify(data));
         syncToCloud();
         displayEmpRecords();
         updateButtons(document.getElementById('empName').value.trim());
@@ -2710,7 +2777,7 @@
         last.checkOut = now.toTimeString().slice(0,5);
       }
 
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+      localStorage.setItem(storageKey(), JSON.stringify(data));
       syncToCloud();
       playSuccessSound(type);
       showAlert('記録しました', 'success');
@@ -3042,11 +3109,13 @@
       
       // シンプルなバックアップ機能（JSONファイルのみ）
       document.getElementById('backupBtn').addEventListener('click', () => {
-        const data = localStorage.getItem(STORAGE_KEY) || '{}';
+        const data = localStorage.getItem(storageKey()) || '{}';
         const now = new Date();
         const dateStr = now.toISOString().slice(0,10).replace(/-/g, '');
         const timeStr = now.toTimeString().slice(0,5).replace(/:/g, '');
-        const filename = `勤怠データ_${dateStr}_${timeStr}.json`;
+        const m = getDeviceMode();
+        const modeLabel = m ? DEVICE_MODES[m].label + '_' : '';
+        const filename = `勤怠データ_${modeLabel}${dateStr}_${timeStr}.json`;
         
         // JSONファイルを直接ダウンロード
         const blob = new Blob([data], { type: 'application/json' });
@@ -3073,7 +3142,7 @@
               showAlert('このファイルはタイムカードのバックアップ形式ではありません', 'error');
               return;
             }
-            localStorage.setItem(STORAGE_KEY, ev.target.result);
+            localStorage.setItem(storageKey(), ev.target.result);
             syncToCloud();
             displayEmpRecords();
             updateButtons(nameInput.value.trim());
@@ -3098,7 +3167,7 @@
       document.getElementById('clearAllBtn').addEventListener('click', () => {
         const pwd = prompt('パスワードを入力してください:');
         if (pwd === '4564') {
-          localStorage.removeItem(STORAGE_KEY);
+          localStorage.removeItem(storageKey());
           syncToCloud();
           displayEmpRecords();
           updateButtons('');
