@@ -1722,12 +1722,12 @@
     // 2台のiPadが同じSupabaseを使っても、このIDで別々の行に保存される
     const DEVICE_MODES = {
       normal: {
-        id: 'ipad-1',
+        id: 'ipad-1',   // クラウドは常にipad-1に統合
         label: '通常勤務',
         form: 'https://docs.google.com/forms/d/e/1FAIpQLSd1-b9gzQ4XT5hbfkNkBJyRMYceK7R5Z-gf2-NzBywQUNPi2g/viewform'
       },
       swim: {
-        id: 'ipad-swim',
+        id: 'ipad-1',   // クラウドは常にipad-1に統合
         label: 'スイミング',
         form: 'https://docs.google.com/forms/d/e/1FAIpQLSdFQLieY7235N6kb3aUu6kihKH2ZiiayIZDMUjl3h65RqlAHQ/viewform'
       }
@@ -1896,18 +1896,30 @@
         el.style.color = '#b91c1c';
         el.textContent = '☁ 未送信あり（電波が戻れば自動送信）';
       } else {
-        const last = localStorage.getItem('lastCloudSync' + modeSuffix());
+        const last = localStorage.getItem('lastCloudSync');
         el.style.background = '#dcfce7';
         el.style.color = '#15803d';
         el.textContent = '☁ クラウド保存済み' + (last ? ' ' + last : '');
       }
     }
 
+    // モードを指定してデータを読む（クラウド送信用）
+    function loadDataForMode(mode) {
+      const key = mode === 'swim' ? STORAGE_KEY + '_swim' : STORAGE_KEY;
+      let obj = null;
+      try { obj = JSON.parse(localStorage.getItem(key) || '{}'); } catch {}
+      return isValidTimecardData(obj) ? obj : {};
+    }
+
     // 全データのスナップショットをSupabaseへ送る（1日1行を上書き）
+    // 通常・スイミング両方を { normal:{...}, swim:{...} } にまとめてipad-1に送る
     async function syncToCloud() {
       if (!cloudConfigured()) return;
       clearTimeout(cloudRetryTimer);
-      const data = loadData();
+      const normalData = loadDataForMode('normal');
+      const swimData   = loadDataForMode('swim');
+      const combined   = { normal: normalData, swim: swimData };
+      const totalCount = countAllRecords(normalData) + countAllRecords(swimData);
       const now = getJstDate();
       const day = getLocalDateString(now);
       try {
@@ -1917,10 +1929,10 @@
           'Prefer': 'return=minimal'
         };
         const payload = {
-          device: getDeviceId(),
+          device: 'ipad-1',
           day: day,
-          data: data,
-          record_count: countAllRecords(data),
+          data: combined,
+          record_count: totalCount,
           updated_at: new Date().toISOString()
         };
         // まず新規送信。今日の分が既にあれば(409)上書きに切り替える
@@ -1930,7 +1942,7 @@
           body: JSON.stringify(payload)
         });
         if (res.status === 409) {
-          res = await fetch(CLOUD_URL + '/rest/v1/tce_backups?device=eq.' + encodeURIComponent(getDeviceId()) + '&day=eq.' + day, {
+          res = await fetch(CLOUD_URL + '/rest/v1/tce_backups?device=eq.ipad-1&day=eq.' + day, {
             method: 'PATCH',
             headers: headers,
             body: JSON.stringify({
@@ -1941,13 +1953,13 @@
           });
         }
         if (!res.ok) throw new Error('HTTP ' + res.status);
-        localStorage.setItem('cloudSyncPending' + modeSuffix(), '0');
-        localStorage.setItem('lastCloudSync' + modeSuffix(),
+        localStorage.setItem('cloudSyncPending', '0');
+        localStorage.setItem('lastCloudSync',
           now.getHours().toString().padStart(2, '0') + ':' + now.getMinutes().toString().padStart(2, '0'));
-        localStorage.setItem('lastCloudSyncDay' + modeSuffix(), day);
+        localStorage.setItem('lastCloudSyncDay', day);
         updateSyncBadge(true);
       } catch (e) {
-        localStorage.setItem('cloudSyncPending' + modeSuffix(), '1');
+        localStorage.setItem('cloudSyncPending', '1');
         updateSyncBadge(false);
         cloudRetryTimer = setTimeout(syncToCloud, 60000); // 60秒後に自動再試行
       }
@@ -1955,15 +1967,15 @@
 
     // 電波が戻ったら未送信分を自動送信
     window.addEventListener('online', () => {
-      if (localStorage.getItem('cloudSyncPending' + modeSuffix()) === '1') syncToCloud();
+      if (localStorage.getItem('cloudSyncPending') === '1') syncToCloud();
     });
 
     // 起動時: 未送信があれば送る、なければ前回の状態をバッジ表示
     window.addEventListener('load', () => {
       setTimeout(() => {
-        if (localStorage.getItem('cloudSyncPending' + modeSuffix()) === '1') {
+        if (localStorage.getItem('cloudSyncPending') === '1') {
           syncToCloud();
-        } else if (localStorage.getItem('lastCloudSync' + modeSuffix())) {
+        } else if (localStorage.getItem('lastCloudSync')) {
           updateSyncBadge(true);
         }
       }, 2000);
