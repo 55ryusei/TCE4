@@ -49,8 +49,11 @@
   <div id="mainView" class="card" hidden>
     <div class="controls">
       <div>
-        <label>端末（用途）</label>
-        <select id="deviceSel" onchange="fillSnapshots()"></select>
+        <label>用途</label>
+        <select id="modeSel" onchange="render()">
+          <option value="normal">通常勤務</option>
+          <option value="swim">スイミング</option>
+        </select>
       </div>
       <div>
         <label>バックアップ（日ごとの保存ポイント）</label>
@@ -122,13 +125,8 @@ function logout() {
   document.getElementById('loginView').hidden = false;
 }
 
-// 端末IDの表示名（index.html側のモード設定と対応）
-function deviceLabel(d) {
-  return { 'ipad-1': '通常勤務', 'ipad-swim': 'スイミング' }[d] || d;
-}
-
 async function init() {
-  const res = await fetch(CLOUD_URL + '/rest/v1/tce_backups?select=id,device,day,record_count,updated_at&order=day.desc&limit=180', { headers: headers() });
+  const res = await fetch(CLOUD_URL + '/rest/v1/tce_backups?select=id,device,day,record_count,updated_at&order=day.desc&limit=90', { headers: headers() });
   if (res.status === 401) { logout(); return; }
   if (!res.ok) { alert('読み込みに失敗しました (HTTP ' + res.status + ')'); return; }
   snapshots = await res.json();
@@ -137,38 +135,21 @@ async function init() {
   }
   document.getElementById('loginView').hidden = true;
   document.getElementById('mainView').hidden = false;
-
-  // 端末（用途）の選択肢を作る
-  const devices = [...new Set(snapshots.map(s => s.device))];
-  const dsel = document.getElementById('deviceSel');
-  dsel.innerHTML = devices.map(d => `<option value="${d}">${deviceLabel(d)}</option>`).join('');
-  fillSnapshots();
-}
-
-function fillSnapshots() {
-  const device = document.getElementById('deviceSel').value;
-  const list = snapshots.filter(s => s.device === device);
   const sel = document.getElementById('snapshotSel');
-  sel.innerHTML = list.map(s =>
+  sel.innerHTML = snapshots.map(s =>
     `<option value="${s.id}">${s.day}（${s.record_count}件）</option>`).join('');
-  if (list.length > 0) {
-    loadSnapshot(list[0].id);
-  } else {
-    current = null;
-    document.getElementById('snapMeta').textContent = 'この端末のバックアップはまだありません。';
-    document.getElementById('summary').innerHTML = '';
-  }
+  if (snapshots.length > 0) loadSnapshot(snapshots[0].id);
 }
 
 async function loadSnapshot(id) {
-  const res = await fetch(CLOUD_URL + '/rest/v1/tce_backups?id=eq.' + id + '&select=device,day,updated_at,record_count,data', { headers: headers() });
+  const res = await fetch(CLOUD_URL + '/rest/v1/tce_backups?id=eq.' + id + '&select=day,updated_at,record_count,data', { headers: headers() });
   if (res.status === 401) { logout(); return; }
   const rows = await res.json();
   current = rows[0];
   if (!current) return;
   const t = new Date(current.updated_at);
   document.getElementById('snapMeta').textContent =
-    `${deviceLabel(current.device)} / 最終送信: ${t.toLocaleString('ja-JP')} / 総記録数: ${current.record_count}件`;
+    `最終送信: ${t.toLocaleString('ja-JP')} / 総記録数: ${current.record_count}件`;
 
   // 期間（11日〜翌月10日 = 10日締め）の一覧を作る
   const periods = new Set();
@@ -205,7 +186,9 @@ function hoursBetween(a, b) {
 function render() {
   if (!current) return;
   const month = document.getElementById('monthSel').value;
-  const data = current.data;
+  const mode = document.getElementById('modeSel').value;
+  // { normal:{...}, swim:{...} } 形式と旧形式（フラット）の両対応
+  const data = (current.data && current.data[mode]) ? current.data[mode] : current.data;
   const names = Object.keys(data).sort((a, b) => a.localeCompare(b, 'ja'));
   let html = '<table><tr><th>名前</th><th>出勤日数</th><th>合計時間</th></tr>';
   for (const name of names) {
@@ -248,11 +231,15 @@ function esc(s) {
 // アプリの「復元」ボタンでそのまま読み込める形式でダウンロード
 function download() {
   if (!current) return;
-  const blob = new Blob([JSON.stringify(current.data)], { type: 'application/json' });
+  const mode = document.getElementById('modeSel').value;
+  const exportData = (current.data && current.data[mode]) ? current.data[mode] : current.data;
+  const blob = new Blob([JSON.stringify(exportData)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = '勤怠データ_' + deviceLabel(current.device) + '_' + current.day.replace(/-/g, '') + '.json';
+  const mode = document.getElementById('modeSel').value;
+  const modeLabel = mode === 'swim' ? 'スイミング' : '通常勤務';
+  a.download = '勤怠データ_' + modeLabel + '_' + current.day.replace(/-/g, '') + '.json';
   a.click();
   URL.revokeObjectURL(url);
 }
