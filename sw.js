@@ -1,9 +1,10 @@
-const CACHE_NAME = 'timecard-v7';
+const CACHE_NAME = 'timecard-v8';
 const urlsToCache = [
   './',
   './index.html',
   './swim.html',
   './manifest.json',
+  './manifest-swim.json',
   './logo.png',
   './icon-192.png',
   './icon-512.png'
